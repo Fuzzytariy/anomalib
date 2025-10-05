@@ -373,6 +373,7 @@ class AnomalibDataModule(LightningDataModule, ABC):
             batch_size=self.train_batch_size,
             num_workers=self.num_workers,
             collate_fn=self.external_collate_fn or self.train_data.collate_fn,
+            persistent_workers=self.num_workers > 0
         )
 
     def val_dataloader(self) -> EVAL_DATALOADERS:
@@ -387,6 +388,7 @@ class AnomalibDataModule(LightningDataModule, ABC):
             batch_size=self.eval_batch_size,
             num_workers=self.num_workers,
             collate_fn=self.external_collate_fn or self.val_data.collate_fn,
+            persistent_workers=self.num_workers > 0
         )
 
     def test_dataloader(self) -> EVAL_DATALOADERS:

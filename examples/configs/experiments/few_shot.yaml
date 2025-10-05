@@ -3,8 +3,8 @@
 output_dir: results/few_shot
 results_file: metrics.csv
 random_seed: 1337
-shots: [1, 2, 4]
-repetitions: 3
+shots: [10,100]
+repetitions: 1
 
 scenarios:
   - name: normal_support
@@ -16,20 +16,20 @@ scenarios:
     models: [regmem]
 
 models:
-  - name: padim
-    class_path: anomalib.models.image.Padim
-    init_args:
-      backbone: resnet18
-      layers: [layer1, layer2, layer3]
-      pre_trained: true
-  - name: patchcore
-    class_path: anomalib.models.image.Patchcore
-    init_args:
-      backbone: wide_resnet50_2
-      layers: [layer2, layer3]
-      pre_trained: true
-      coreset_sampling_ratio: 0.1
-      num_neighbors: 9
+#  - name: padim
+#    class_path: anomalib.models.image.Padim
+#    init_args:
+#      backbone: resnet18
+#      layers: [layer1, layer2, layer3]
+#      pre_trained: true
+#  - name: patchcore
+#    class_path: anomalib.models.image.Patchcore
+#    init_args:
+#      backbone: wide_resnet50_2
+#      layers: [layer2, layer3]
+#      pre_trained: true
+#      coreset_sampling_ratio: 0.1
+#      num_neighbors: 9
   - name: regmem
     class_path: anomalib.models.image.RegMemFSAD
     init_args:
@@ -41,7 +41,7 @@ models:
       distribution_weights: [0.5, 0.3, 0.2]
       learning_rate: 0.0001
     trainer:
-      max_epochs: 25
+      max_epochs: 2
 
 # Dataset definitions focusing on PCB-like categories
 
