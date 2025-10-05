@@ -53,6 +53,7 @@ class RegMemFewShotModel(nn.Module):
         self.memory_bank.reset()
 
     def collect_support_features(self, images: Tensor) -> Tensor:
+        self.memory_bank.device = images.device
         features = self.registration.extract(images)
         registered = self.registration.register_support_batch(features)
         self.memory_bank.update(registered)
