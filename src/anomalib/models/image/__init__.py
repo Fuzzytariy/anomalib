@@ -58,6 +58,7 @@ from .fre import Fre
 from .ganomaly import Ganomaly
 from .padim import Padim
 from .patchcore import Patchcore
+from .regmemfsad import RegMemFSAD
 from .reverse_distillation import ReverseDistillation
 from .stfpm import Stfpm
 from .supersimplenet import Supersimplenet
@@ -80,6 +81,7 @@ __all__ = [
     "Ganomaly",
     "Padim",
     "Patchcore",
+    "RegMemFSAD",
     "ReverseDistillation",
     "Stfpm",
     "Supersimplenet",
