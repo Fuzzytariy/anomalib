@@ -71,7 +71,7 @@ class RegMemFSAD(MemoryBankMixin, AnomalibModule):
     def validation_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
         del args, kwargs
         predictions = self.model.predict(batch.image)
-        return batch.update(image_scores=predictions.scores, anomaly_maps=predictions.anomaly_maps)
+        return batch.update(pred_score=predictions.pred_score, anomaly_map=predictions.anomaly_map)
 
     def test_step(self, batch: Batch, *args, **kwargs) -> STEP_OUTPUT:
         return self.validation_step(batch, *args, **kwargs)

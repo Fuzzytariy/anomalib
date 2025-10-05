@@ -19,8 +19,9 @@ from anomalib.models.components.regmem import (
 class AnomalyPredictions:
     """Container storing anomaly scores and maps."""
 
-    scores: Tensor
-    anomaly_maps: dict[str, Tensor]
+    pred_score: Tensor
+    anomaly_map: Tensor
+    layer_anomaly_maps: dict[str, Tensor] | None = None
 
 
 class RegMemFewShotModel(nn.Module):
@@ -82,19 +83,31 @@ class RegMemFewShotModel(nn.Module):
     def predict(self, images: Tensor) -> AnomalyPredictions:
         features = self.registration.extract(images)
         outputs = self.registration.align_query_to_prototypes(features)
-        anomaly_maps: dict[str, Tensor] = {}
-        image_scores = []
+        layer_anomaly_maps: dict[str, Tensor] = {}
+        layer_scores: list[Tensor] = []
+        aggregated_maps: list[Tensor] = []
         for layer in self.layers:
             aligned_support = outputs.aligned_support[layer]
             scores = self._score_layer(layer, aligned_support)
             batch, _, height, width = aligned_support.shape
             anomaly_map = scores.view(batch, height, width)
-            anomaly_maps[layer] = anomaly_map
-            image_scores.append(anomaly_map.view(batch, -1).topk(k=10, dim=1).values.mean(dim=1))
+            layer_anomaly_maps[layer] = anomaly_map
+            aggregated_maps.append(anomaly_map)
+            layer_scores.append(anomaly_map.view(batch, -1).topk(k=10, dim=1).values.mean(dim=1))
 
-        stacked_scores = torch.stack(image_scores, dim=0)
+        if not layer_scores:
+            msg = "No layers available for scoring. Ensure model is configured with at least one feature layer."
+            raise RuntimeError(msg)
+
+        stacked_scores = torch.stack(layer_scores, dim=0)
         final_scores = stacked_scores.mean(dim=0)
-        return AnomalyPredictions(scores=final_scores, anomaly_maps=anomaly_maps)
+        stacked_maps = torch.stack(aggregated_maps, dim=0)
+        combined_map = stacked_maps.mean(dim=0)
+        return AnomalyPredictions(
+            pred_score=final_scores,
+            anomaly_map=combined_map,
+            layer_anomaly_maps=layer_anomaly_maps,
+        )
 
     def registration_loss(self, images: Tensor) -> Tensor:
         if images.shape[0] < 2:
