@@ -40,6 +40,8 @@ models:
       num_neighbors: 5
       distribution_weights: [0.5, 0.3, 0.2]
       learning_rate: 0.0001
+    trainer:
+      max_epochs: 25
 
 # Dataset definitions focusing on PCB-like categories
 

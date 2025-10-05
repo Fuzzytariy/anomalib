@@ -55,11 +55,12 @@ class Scenario:
 
 @dataclass(slots=True)
 class ModelConfig:
-    """Container for model instantiation details."""
+    """Container for model instantiation and trainer details."""
 
     name: str
     class_path: str
     init_args: dict[str, Any]
+    trainer_args: dict[str, Any]
 
 
 @dataclass(slots=True)
@@ -209,6 +210,7 @@ def _load_config(path: Path) -> ExperimentConfig:
                 name=model["name"],
                 class_path=model["class_path"],
                 init_args={**(model.get("init_args") or {})},
+                trainer_args={**(model.get("trainer") or {})},
             )
         )
 
@@ -300,11 +302,14 @@ def run_experiments(config: ExperimentConfig) -> pd.DataFrame:
                             if isinstance(learning_type, LearningType):
                                 show_progress = learning_type != LearningType.ZERO_SHOT
 
+                            trainer_kwargs = {**model_cfg.trainer_args}
+                            trainer_kwargs.setdefault("accelerator", "auto")
+                            trainer_kwargs.setdefault("devices", 1)
+                            trainer_kwargs["enable_progress_bar"] = show_progress
+
                             engine = Engine(
                                 logger=False,
-                                enable_progress_bar=show_progress,
-                                accelerator="auto",
-                                devices=1,
+                                **trainer_kwargs,
                             )
 
                             if torch.cuda.is_available():
