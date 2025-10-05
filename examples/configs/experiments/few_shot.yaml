@@ -1,0 +1,75 @@
+# Few-shot anomaly detection benchmark configuration.
+
+output_dir: results/few_shot
+results_file: metrics.csv
+random_seed: 1337
+shots: [1, 2, 4]
+repetitions: 3
+
+scenarios:
+  - name: normal_support
+    description: Few-shot evaluation using only normal support images.
+    anomaly_support: 0
+  - name: anomaly_augmented
+    description: Semi-supervised variant with one anomalous support sample.
+    anomaly_support: 1
+    models: [regmem]
+
+models:
+  - name: padim
+    class_path: anomalib.models.image.Padim
+    init_args:
+      backbone: resnet18
+      layers: [layer1, layer2, layer3]
+      pre_trained: true
+  - name: patchcore
+    class_path: anomalib.models.image.Patchcore
+    init_args:
+      backbone: wide_resnet50_2
+      layers: [layer2, layer3]
+      pre_trained: true
+      coreset_sampling_ratio: 0.1
+      num_neighbors: 9
+  - name: regmem
+    class_path: anomalib.models.image.RegMemFSAD
+    init_args:
+      backbone: resnet18
+      layers: [layer2, layer3]
+      pre_trained: true
+      coreset_sampling_ratio: 0.05
+      num_neighbors: 5
+      distribution_weights: [0.5, 0.3, 0.2]
+      learning_rate: 0.0001
+
+# Dataset definitions focusing on PCB-like categories
+
+datasets:
+  - name: mvtec_pcb
+    datamodule:
+      class_path: anomalib.data.MVTecAD
+      init_args:
+        root: ./datasets/MVTecAD
+        train_batch_size: 8
+        eval_batch_size: 8
+        num_workers: 4
+    categories: [capsule, screw, transistor]
+
+  - name: mpdd
+    datamodule:
+      class_path: anomalib.data.MPDD
+      init_args:
+        root: ./datasets/MPDD
+        train_batch_size: 8
+        eval_batch_size: 8
+        num_workers: 4
+    categories: [bracket_black, bracket_brown, metal_plate]
+
+  - name: visa_pcb
+    datamodule:
+      class_path: anomalib.data.Visa
+      init_args:
+        root: ./datasets/VisA
+        train_batch_size: 8
+        eval_batch_size: 8
+        num_workers: 4
+    categories: [pcb1, pcb2, pcb3, pcb4]
