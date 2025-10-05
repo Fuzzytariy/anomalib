@@ -5,8 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import torch
-from torch import Tensor
 import torch.nn as nn
+from torch import Tensor
+from torch.nn import functional as F
 
 from anomalib.models.components.regmem import (
     DistributionEstimator,
@@ -101,7 +102,19 @@ class RegMemFewShotModel(nn.Module):
 
         stacked_scores = torch.stack(layer_scores, dim=0)
         final_scores = stacked_scores.mean(dim=0)
-        stacked_maps = torch.stack(aggregated_maps, dim=0)
+        if len(aggregated_maps) == 1:
+            resized_maps = aggregated_maps
+        else:
+            target_height = max(map_.shape[-2] for map_ in aggregated_maps)
+            target_width = max(map_.shape[-1] for map_ in aggregated_maps)
+            target_size = (target_height, target_width)
+            resized_maps = [
+                map_
+                if map_.shape[-2:] == target_size
+                else F.interpolate(map_.unsqueeze(1), size=target_size, mode="bilinear", align_corners=False).squeeze(1)
+                for map_ in aggregated_maps
+            ]
+        stacked_maps = torch.stack(resized_maps, dim=0)
         combined_map = stacked_maps.mean(dim=0)
         return AnomalyPredictions(
             pred_score=final_scores,
