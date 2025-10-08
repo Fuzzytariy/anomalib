@@ -28,6 +28,8 @@ from torchvision import transforms
 
 from anomalib.models.image.regmm.siamese import CosLoss, Encoder, Predictor, N_PARAMS, stn_net
 
+BACKBONE_NAME = "wide_resnet50_2"
+
 try:
     import kornia as K  # type: ignore
 except Exception as exc:  # pragma: no cover - optional dependency
@@ -295,6 +297,7 @@ def main() -> None:
         drop_last=True,
     )
 
+    print(f"Initializing STN backbone: {BACKBONE_NAME}")
     stn_model = stn_net(args.stn_mode, pretrained=True).to(device)
     encoder = Encoder().to(device)
     predictor = Predictor().to(device)
