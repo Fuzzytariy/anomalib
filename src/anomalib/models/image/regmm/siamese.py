@@ -1,319 +1,521 @@
-"""Siamese配准网络实现
+"""RegAD Siamese registration backbone and losses.
 
-实现双支路的Siamese网络，包含可学习的空间变换网络(STN)用于特征对齐。
+This module ports the Siamese encoder/predictor branches, the spatial
+transformer network (STN) equipped ResNet backbone, and the cosine/L2 losses
+from the `MediaBrain-SJTU/RegAD` reference implementation.  The code is adapted
+so that it can be consumed by the RegMM PatchCore integration while otherwise
+staying faithful to the original project structure.
 """
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Optional
+
 import torch
-import torch.nn as nn
+from torch import Tensor, nn
 import torch.nn.functional as F
-from torch import Tensor
-from typing import Dict, List, Tuple, Optional
+from torchvision.models import ResNet18_Weights, resnet18
 
-from anomalib.models.components.feature_extractors.timm import TimmFeatureExtractor
+__all__ = [
+    "Encoder",
+    "Predictor",
+    "STNModule",
+    "ResNetWithSTN",
+    "stn_net",
+    "SiameseRegistrationNetwork",
+    "SiamesePretrainModel",
+    "CosLoss",
+    "L2Loss",
+    "N_PARAMS",
+]
 
 
-class SpatialTransformNetwork(nn.Module):
-    """空间变换网络(STN)用于特征对齐
-    
-    在layer3特征后接入STN，学习空间变换参数来对齐特征图。
-    """
-    
-    def __init__(self, input_channels: int):
+# ---------------------------------------------------------------------------
+# Utilities shared with the original RegAD implementation
+
+
+N_PARAMS = {
+    "affine": 6,
+    "translation": 2,
+    "rotation": 1,
+    "scale": 2,
+    "shear": 2,
+    "rotation_scale": 3,
+    "translation_scale": 4,
+    "rotation_translation": 3,
+    "rotation_translation_scale": 5,
+}
+
+
+def conv3x3(
+    in_planes: int,
+    out_planes: int,
+    stride: int = 1,
+    groups: int = 1,
+    dilation: int = 1,
+) -> nn.Conv2d:
+    """3x3 convolution with padding."""
+
+    return nn.Conv2d(
+        in_planes,
+        out_planes,
+        kernel_size=3,
+        stride=stride,
+        padding=dilation,
+        groups=groups,
+        bias=False,
+        dilation=dilation,
+    )
+
+
+def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
+    """1x1 convolution."""
+
+    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
+
+
+# ---------------------------------------------------------------------------
+# Siamese encoder & predictor branches
+
+
+class Encoder(nn.Module):
+    """Channel preserving encoder copied from RegAD."""
+
+    def __init__(self) -> None:
         super().__init__()
-        
-        # 定位网络 - 预测空间变换参数
-        self.localization = nn.Sequential(
-            nn.Conv2d(input_channels, 64, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, stride=2),
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2, stride=2),
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool2d(1)
-        )
-        
-        # 回归网络 - 预测仿射变换参数(6个参数)
-        self.fc_loc = nn.Sequential(
-            nn.Linear(256, 32),
-            nn.ReLU(inplace=True),
-            nn.Linear(32, 6)
-        )
-        
-        # 初始化变换参数为恒等变换
-        self.fc_loc[-1].weight.data.zero_()
-        self.fc_loc[-1].bias.data.copy_(torch.tensor([1, 0, 0, 0, 1, 0], dtype=torch.float))
-    
+        self.conv1 = conv1x1(in_planes=256, out_planes=256)
+        self.bn1 = nn.BatchNorm2d(256)
+        self.relu1 = nn.ReLU()
+
+        self.conv2 = conv1x1(in_planes=256, out_planes=256)
+        self.bn2 = nn.BatchNorm2d(256)
+        self.relu2 = nn.ReLU()
+
+        self.conv3 = conv1x1(in_planes=256, out_planes=256)
+        self.bn3 = nn.BatchNorm2d(256)
+        self.relu3 = nn.ReLU()
+
     def forward(self, x: Tensor) -> Tensor:
-        """应用空间变换到输入特征图"""
-        # 预测变换参数
-        xs = self.localization(x)
-        xs = xs.view(xs.size(0), -1)
-        theta = self.fc_loc(xs)
-        theta = theta.view(-1, 2, 3)
-        
-        # 创建网格并应用变换（改进参数设置）
-        B, C, H, W = x.shape
-        grid = F.affine_grid(theta, (B, C, H, W), align_corners=False)
-        x_transformed = F.grid_sample(x, grid, mode="bilinear", padding_mode="zeros", align_corners=False)
-        
-        return x_transformed
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu1(x)
+
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.relu2(x)
+
+        out = self.conv3(x)
+        return out
+
+
+class Predictor(nn.Module):
+    """Predictor head (also channel preserving) from RegAD."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.conv1 = conv1x1(in_planes=256, out_planes=256)
+        self.bn1 = nn.BatchNorm2d(256)
+        self.relu1 = nn.ReLU()
+
+        self.conv2 = conv1x1(in_planes=256, out_planes=256)
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu1(x)
+
+        out = self.conv2(x)
+        return out
+
+
+# ---------------------------------------------------------------------------
+# Spatial Transformer Network components
+
+
+class STNModule(nn.Module):
+    """Spatial transformer module reproduced from the RegAD codebase."""
+
+    def __init__(self, in_channels: int, block_index: int, stn_mode: str) -> None:
+        super().__init__()
+
+        if stn_mode not in N_PARAMS:
+            raise ValueError(f"Unsupported stn_mode '{stn_mode}'. Choices: {list(N_PARAMS)}")
+
+        self.stn_mode = stn_mode
+        self.stn_n_params = N_PARAMS[stn_mode]
+        # In RegAD the feature-map size per block follows 56 // (4 * block_index).
+        self.feat_size = 56 // (4 * block_index)
+
+        self.conv = nn.Sequential(
+            conv3x3(in_planes=in_channels, out_planes=64),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+            conv3x3(in_planes=64, out_planes=16),
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+        )
+
+        self.fc = nn.Sequential(
+            nn.Linear(16 * self.feat_size * self.feat_size, 1024),
+            nn.ReLU(True),
+            nn.Linear(1024, self.stn_n_params),
+        )
+
+        # Parameter initialisation mirrors the RegAD reference.
+        nn.init.zeros_(self.fc[2].weight)
+        if self.stn_mode == "affine":
+            bias = torch.tensor([1, 0, 0, 0, 1, 0], dtype=torch.float)
+        elif self.stn_mode in {"translation", "shear"}:
+            bias = torch.tensor([0, 0], dtype=torch.float)
+        elif self.stn_mode == "scale":
+            bias = torch.tensor([1, 1], dtype=torch.float)
+        elif self.stn_mode == "rotation":
+            bias = torch.tensor([0], dtype=torch.float)
+        elif self.stn_mode == "rotation_scale":
+            bias = torch.tensor([0, 1, 1], dtype=torch.float)
+        elif self.stn_mode == "translation_scale":
+            bias = torch.tensor([0, 0, 1, 1], dtype=torch.float)
+        elif self.stn_mode == "rotation_translation":
+            bias = torch.tensor([0, 0, 0], dtype=torch.float)
+        else:  # rotation_translation_scale
+            bias = torch.tensor([0, 0, 0, 1, 1], dtype=torch.float)
+        self.fc[2].bias = nn.Parameter(bias)
+
+    def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        batch_size = x.size(0)
+        conv_x = self.conv(x)
+        theta = self.fc(conv_x.view(batch_size, -1))
+        theta_affine = self._build_theta(theta, batch_size, x.device)
+        grid = F.affine_grid(theta_affine, x.shape, align_corners=False)
+        transformed = F.grid_sample(x, grid, padding_mode="reflection", align_corners=False)
+        return transformed, theta_affine
+
+    def _build_theta(self, theta: Tensor, batch_size: int, device: torch.device) -> Tensor:
+        """Construct a 2x3 affine matrix according to the configured mode."""
+
+        if self.stn_mode == "affine":
+            return theta.view(batch_size, 2, 3)
+
+        base = torch.zeros(batch_size, 2, 3, device=device, dtype=torch.float32)
+        base[:, 0, 0] = 1.0
+        base[:, 1, 1] = 1.0
+
+        if self.stn_mode == "translation":
+            base[:, 0, 2] = theta[:, 0]
+            base[:, 1, 2] = theta[:, 1]
+        elif self.stn_mode == "rotation":
+            angle = theta[:, 0]
+            base[:, 0, 0] = torch.cos(angle)
+            base[:, 0, 1] = -torch.sin(angle)
+            base[:, 1, 0] = torch.sin(angle)
+            base[:, 1, 1] = torch.cos(angle)
+        elif self.stn_mode == "scale":
+            base[:, 0, 0] = theta[:, 0]
+            base[:, 1, 1] = theta[:, 1]
+        elif self.stn_mode == "shear":
+            base[:, 0, 1] = theta[:, 0]
+            base[:, 1, 0] = theta[:, 1]
+        elif self.stn_mode == "rotation_scale":
+            angle = theta[:, 0]
+            base[:, 0, 0] = torch.cos(angle) * theta[:, 1]
+            base[:, 0, 1] = -torch.sin(angle)
+            base[:, 1, 0] = torch.sin(angle)
+            base[:, 1, 1] = torch.cos(angle) * theta[:, 2]
+        elif self.stn_mode == "translation_scale":
+            base[:, 0, 2] = theta[:, 0]
+            base[:, 1, 2] = theta[:, 1]
+            base[:, 0, 0] = theta[:, 2]
+            base[:, 1, 1] = theta[:, 3]
+        elif self.stn_mode == "rotation_translation":
+            angle = theta[:, 0]
+            base[:, 0, 0] = torch.cos(angle)
+            base[:, 0, 1] = -torch.sin(angle)
+            base[:, 1, 0] = torch.sin(angle)
+            base[:, 1, 1] = torch.cos(angle)
+            base[:, 0, 2] = theta[:, 1]
+            base[:, 1, 2] = theta[:, 2]
+        else:  # rotation_translation_scale
+            angle = theta[:, 0]
+            base[:, 0, 0] = torch.cos(angle) * theta[:, 3]
+            base[:, 0, 1] = -torch.sin(angle)
+            base[:, 1, 0] = torch.sin(angle)
+            base[:, 1, 1] = torch.cos(angle) * theta[:, 4]
+            base[:, 0, 2] = theta[:, 1]
+            base[:, 1, 2] = theta[:, 2]
+
+        return base
+
+
+class BasicBlock(nn.Module):
+    expansion: int = 1
+
+    def __init__(
+        self,
+        inplanes: int,
+        planes: int,
+        stride: int = 1,
+        downsample: Optional[nn.Module] = None,
+        groups: int = 1,
+        base_width: int = 64,
+        dilation: int = 1,
+        norm_layer: Optional[nn.Module] = None,
+    ) -> None:
+        super().__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        if groups != 1 or base_width != 64:
+            raise ValueError("BasicBlock only supports groups=1 and base_width=64")
+        if dilation > 1:
+            raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
+
+        self.conv1 = conv3x3(inplanes, planes, stride)
+        self.bn1 = norm_layer(planes)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = conv3x3(planes, planes)
+        self.bn2 = norm_layer(planes)
+        self.downsample = downsample
+        self.stride = stride
+
+    def forward(self, x: Tensor) -> Tensor:
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out += identity
+        out = self.relu(out)
+        return out
+
+
+class ResNetWithSTN(nn.Module):
+    """ResNet-18 backbone augmented with STN modules (RegAD)."""
+
+    def __init__(self, stn_mode: str, block: type[nn.Module] = BasicBlock, layers: Iterable[int] = (2, 2, 2, 2)) -> None:
+        super().__init__()
+        self.inplanes = 64
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+
+        self.layer1 = self._make_layer(block, 64, layers[0], stride=1)
+        self.stn1 = STNModule(64, 1, stn_mode)
+
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
+        self.stn2 = STNModule(128, 2, stn_mode)
+
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
+        self.stn3 = STNModule(256, 3, stn_mode)
+
+        # placeholders populated after forward pass
+        self.stn1_output: Tensor | None = None
+        self.stn2_output: Tensor | None = None
+        self.stn3_output: Tensor | None = None
+
+    def _make_layer(self, block: type[nn.Module], planes: int, blocks: int, stride: int = 1) -> nn.Sequential:
+        downsample = None
+        if stride != 1 or self.inplanes != planes * block.expansion:
+            downsample = nn.Sequential(
+                conv1x1(self.inplanes, planes * block.expansion, stride),
+                nn.BatchNorm2d(planes * block.expansion),
+            )
+
+        layers = [block(self.inplanes, planes, stride, downsample)]
+        self.inplanes = planes * block.expansion
+        for _ in range(1, blocks):
+            layers.append(block(self.inplanes, planes))
+        return nn.Sequential(*layers)
+
+    @staticmethod
+    def _affine_inverse(theta: Tensor) -> Tensor:
+        batch_size = theta.size(0)
+        device = theta.device
+        bottom_row = torch.tensor([0, 0, 1], dtype=theta.dtype, device=device)
+        bottom = bottom_row.view(1, 1, 3).repeat(batch_size, 1, 1)
+        full = torch.cat([theta, bottom], dim=1)
+        inv = torch.inverse(full)
+        return inv[:, :2, :]
+
+    @staticmethod
+    def _fixstn(x: Tensor, theta: Tensor) -> Tensor:
+        grid = F.affine_grid(theta, x.shape, align_corners=False)
+        return F.grid_sample(x, grid, padding_mode="reflection", align_corners=False)
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+
+        x = self.layer1(x)
+        x, theta1 = self.stn1(x)
+        inv_theta1 = self._affine_inverse(theta1.detach())
+        self.stn1_output = self._fixstn(x.detach(), inv_theta1)
+
+        x = self.layer2(x)
+        x, theta2 = self.stn2(x)
+        inv_theta2 = self._affine_inverse(theta2.detach())
+        self.stn2_output = self._fixstn(self._fixstn(x.detach(), inv_theta2), inv_theta1)
+
+        x = self.layer3(x)
+        out, theta3 = self.stn3(x)
+        inv_theta3 = self._affine_inverse(theta3.detach())
+        self.stn3_output = self._fixstn(self._fixstn(self._fixstn(out.detach(), inv_theta3), inv_theta2), inv_theta1)
+
+        return out
+
+
+def stn_net(stn_mode: str, pretrained: bool = True) -> ResNetWithSTN:
+    """Construct the STN-equipped ResNet-18 backbone."""
+
+    model = ResNetWithSTN(stn_mode, BasicBlock, [2, 2, 2, 2])
+    if pretrained:
+        weights = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1).state_dict()
+        model_dict = model.state_dict()
+        filtered = {k: v for k, v in weights.items() if k in model_dict}
+        model_dict.update(filtered)
+        model.load_state_dict(model_dict)
+    return model
+
+
+# ---------------------------------------------------------------------------
+# Siamese wrapper compatible with RegMM PatchCore
+
+
+@dataclass
+class SiameseConfig:
+    stn_mode: str = "rotation_scale"
 
 
 class SiameseRegistrationNetwork(nn.Module):
-    """Siamese配准网络（SimSiam风格）
-    
-    双支路共享Backbone，在layer3后接入STN进行特征对齐。
-    使用SimSiam结构防止特征塌陷。
-    """
-    
+    """Wraps the RegAD Siamese components for RegMM integration."""
+
     def __init__(
         self,
         backbone: str = "resnet18",
         pre_trained: bool = True,
-        layers: List[str] = ["layer1", "layer2", "layer3"],
-        projection_dim: int = 128,
+        layers: Optional[List[str]] = None,
         stn_enabled: bool = True,
-        predictor_dim: int = 512  # 预测器隐藏层维度
-    ):
+        stn_mode: str = "rotation_scale",
+    ) -> None:
         super().__init__()
-        
-        self.backbone = backbone
-        self.layers = layers
+        if backbone != "resnet18":
+            raise ValueError("RegAD SiameseRegistrationNetwork only supports resnet18 backbone")
+
+        self.layers = layers or ["layer1", "layer2", "layer3"]
+        if not stn_enabled:
+            raise ValueError("RegAD SiameseRegistrationNetwork requires the STN-enabled backbone")
         self.stn_enabled = stn_enabled
-        
-        # 共享的特征提取器
-        self.feature_extractor = TimmFeatureExtractor(
-            backbone=backbone,
-            pre_trained=pre_trained,
-            layers=layers
-        )
-        
-        # 获取layer3的输出通道数
-        with torch.no_grad():
-            dummy_input = torch.randn(1, 3, 224, 224)
-            features = self.feature_extractor(dummy_input)
-            layer3_channels = features["layer3"].shape[1]
-        
-        # 空间变换网络
-        if stn_enabled:
-            self.stn = SpatialTransformNetwork(layer3_channels)
+        self.config = SiameseConfig(stn_mode=stn_mode)
+
+        # In the RegAD implementation the STN backbone, encoder and predictor are
+        # independent modules.  We expose them here as submodules so that the
+        # weight loading logic in ``torch_model.py`` can locate the parameters.
+        if self.stn_enabled:
+            self.feature_extractor = stn_net(self.config.stn_mode, pretrained=pre_trained)
         else:
-            self.stn = None
-        
-        # 投影头 - 将特征映射到低维空间（使用LayerNorm避免批次大小问题）
-        self.projection_head = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(layer3_channels, 512),
-            nn.LayerNorm(512),  # 使用LayerNorm替代BatchNorm
-            nn.ReLU(inplace=True),
-            nn.Linear(512, projection_dim),
-            nn.LayerNorm(projection_dim)  # SimSiam风格：使用LayerNorm
-        )
-        
-        # 预测器头 - 防止特征塌陷的关键组件
-        self.predictor = nn.Sequential(
-            nn.Linear(projection_dim, predictor_dim),
-            nn.LayerNorm(predictor_dim),  # 使用LayerNorm替代BatchNorm
-            nn.ReLU(inplace=True),
-            nn.Linear(predictor_dim, projection_dim)
-        )
-    
-    def forward(self, x1: Tensor, x2: Optional[Tensor] = None, stop_gradient: bool = True) -> Dict[str, Tensor]:
-        """前向传播（SimSiam风格）
-        
-        Args:
-            x1: 第一支路输入张量
-            x2: 第二支路输入张量，如果为None则使用x1
-            stop_gradient: 是否对第二支路使用stop-gradient
-            
-        Returns:
-            包含两支路输出的字典
-        """
-        if x2 is None:
-            x2 = x1
-        
-        # 提取特征
-        features1 = self.feature_extractor(x1)
-        features2 = self.feature_extractor(x2)
-        
-        # 获取layer3特征
-        layer3_1 = features1["layer3"]
-        layer3_2 = features2["layer3"]
-        
-        # 应用空间变换（如果启用）
-        if self.stn_enabled and self.stn is not None:
-            layer3_1 = self.stn(layer3_1)
-            layer3_2 = self.stn(layer3_2)
-        
-        # 通过投影头
-        z1 = self.projection_head(layer3_1)
-        z2 = self.projection_head(layer3_2)
-        
-        # 归一化（SimSiam风格）
-        z1 = F.normalize(z1, p=2, dim=1)
-        z2 = F.normalize(z2, p=2, dim=1)
-        
-        # 应用预测器（只在第一支路）
+            # fall back to the vanilla resnet18 without spatial alignment
+            self.feature_extractor = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1 if pre_trained else None)
+        self.encoder = Encoder()
+        self.predictor = Predictor()
+
+    def forward(self, query: Tensor, support: Optional[Tensor] = None) -> Dict[str, Tensor]:
+        if support is None:
+            support = query
+
+        query_feat = self._extract_backbone(query)
+        support_feat = self._extract_backbone(support)
+
+        z1 = self.encoder(query_feat)
+        z2 = self.encoder(support_feat)
         p1 = self.predictor(z1)
-        
-        # SimSiam关键：对第二支路使用stop-gradient
-        if stop_gradient:
-            z2 = z2.detach()  # 阻断梯度传播
-        
+        p2 = self.predictor(z2)
+
         return {
-            "p1": p1,  # 预测结果
-            "z1": z1,  # 第一支路投影
-            "z2": z2,  # 第二支路投影（可能detach）
-            "features1": layer3_1,
-            "features2": layer3_2
+            "query_backbone": query_feat,
+            "support_backbone": support_feat,
+            "z1": z1,
+            "z2": z2,
+            "p1": p1,
+            "p2": p2,
         }
 
-    # ------------------------------------------------------------------
-    # Feature extraction for anomaly detection
-    #
-    # During inference with PatchCore we do not require the SimSiam projection
-    # vectors.  Instead we need intermediate CNN features from multiple
-    # layers.  This helper extracts such features and applies the spatial
-    # transformer on the deep layer when enabled.  It returns a
-    # dictionary mapping layer names to aligned feature maps.  Only the
-    # layers specified in ``self.layers`` are returned.  For ``layer3`` the
-    # STN alignment is applied; other layers are returned unchanged.
+    def _extract_backbone(self, x: Tensor) -> Tensor:
+        if isinstance(self.feature_extractor, ResNetWithSTN):
+            return self.feature_extractor(x)
+        return self.feature_extractor(x)
+
     def extract_features(self, x: Tensor) -> Dict[str, Tensor]:
-        """Extract backbone features for PatchCore.
+        if not isinstance(self.feature_extractor, ResNetWithSTN):
+            raise RuntimeError("extract_features requires the STN-enabled backbone")
 
-        Args:
-            x (Tensor): Input tensor of shape ``(B, 3, H, W)``.
-
-        Returns:
-            Dict[str, Tensor]: A mapping from layer names (e.g. ``"layer2"``,
-            ``"layer3"``) to spatial feature maps after alignment.  Only
-            layers listed in ``self.layers`` are included.
-        """
-        # Use the timm feature extractor to obtain all intermediate features.
-        feats = self.feature_extractor(x)
-        feat_dict: Dict[str, Tensor] = {}
-        for layer in self.layers:
-            if layer not in feats:
-                # If the requested layer is missing, skip it.  This can
-                # happen if ``self.layers`` includes keys not produced by
-                # ``TimmFeatureExtractor``.  PatchCore will handle missing
-                # layers by reusing the deepest available layer.
-                continue
-            feat = feats[layer]
-            # Only apply STN alignment on the deepest layer (layer3) when
-            # enabled.  Alignment of shallower layers did not show
-            # consistent gains in preliminary experiments and introduces
-            # additional overhead.
-            if self.stn_enabled and self.stn is not None and layer == "layer3":
-                feat = self.stn(feat)
-            feat_dict[layer] = feat
-        return feat_dict
+        _ = self.feature_extractor(x)
+        outputs: Dict[str, Tensor] = OrderedDict()
+        if "layer1" in self.layers and self.feature_extractor.stn1_output is not None:
+            outputs["layer1"] = self.feature_extractor.stn1_output
+        if "layer2" in self.layers and self.feature_extractor.stn2_output is not None:
+            outputs["layer2"] = self.feature_extractor.stn2_output
+        if "layer3" in self.layers and self.feature_extractor.stn3_output is not None:
+            outputs["layer3"] = self.feature_extractor.stn3_output
+        return outputs
 
 
 class SiamesePretrainModel(nn.Module):
-    """Siamese预训练模型（SimSiam风格）
-    
-    包含完整的训练流程和损失计算，使用SimSiam损失防止特征塌陷。
-    """
-    
-    def __init__(
-        self,
-        backbone: str = "resnet18",
-        pre_trained: bool = True,
-        layers: List[str] = ["layer1", "layer2", "layer3"],
-        projection_dim: int = 128,
-        stn_enabled: bool = True,
-        predictor_dim: int = 512
-    ):
+    """Simple wrapper computing the symmetric cosine loss used in RegAD."""
+
+    def __init__(self, stn_mode: str = "rotation_scale", pre_trained: bool = True) -> None:
         super().__init__()
-        
         self.siamese_net = SiameseRegistrationNetwork(
-            backbone=backbone,
+            backbone="resnet18",
             pre_trained=pre_trained,
-            layers=layers,
-            projection_dim=projection_dim,
-            stn_enabled=stn_enabled,
-            predictor_dim=predictor_dim
+            stn_mode=stn_mode,
         )
-    
-    def forward(self, x1: Tensor, x2: Tensor) -> Dict[str, Tensor]:
-        """前向传播，计算SimSiam损失"""
-        # 通过Siamese网络（使用stop-gradient）
-        outputs = self.siamese_net(x1, x2, stop_gradient=True)
-        
-        # SimSiam损失：负余弦相似度
-        p1 = outputs["p1"]  # 预测结果
-        z2 = outputs["z2"]  # 目标（detached）
-        
-        # 计算负余弦相似度损失
-        p1 = F.normalize(p1, p=2, dim=1)
-        z2 = F.normalize(z2, p=2, dim=1)
-        
-        # SimSiam损失：- (p1 · z2) 的均值
-        loss = -(p1 * z2).sum(dim=1).mean()
-        
-        # 计算对称损失（交换x1和x2）
-        outputs_sym = self.siamese_net(x2, x1, stop_gradient=True)
-        p2 = F.normalize(outputs_sym["p1"], p=2, dim=1)
-        z1 = F.normalize(outputs_sym["z2"], p=2, dim=1)
-        
-        loss_sym = -(p2 * z1).sum(dim=1).mean()
-        
-        # 总损失
-        total_loss = 0.5 * (loss + loss_sym)
-        
-        # 计算余弦相似度用于监控（监控p1和z2的相似度，反映SimSiam训练效果）
-        p1_z2_sim = F.cosine_similarity(p1, z2, dim=1)
-        p2_z1_sim = F.cosine_similarity(p2, z1, dim=1)
-        avg_simsiam_sim = 0.5 * (p1_z2_sim.mean() + p2_z1_sim.mean())
-        
-        outputs["loss"] = total_loss
-        outputs["cosine_similarity"] = avg_simsiam_sim  # 使用SimSiam相似度而不是z1-z2相似度
-        outputs["simsiam_loss"] = loss
-        outputs["sym_loss"] = loss_sym
-        outputs["p1_z2_sim"] = p1_z2_sim.mean()  # 单独监控p1-z2相似度
-        outputs["p2_z1_sim"] = p2_z1_sim.mean()  # 单独监控p2-z1相似度
-        
+
+    def forward(self, query: Tensor, support: Tensor) -> Dict[str, Tensor]:
+        outputs = self.siamese_net(query, support)
+
+        loss_forward = CosLoss(outputs["p1"], outputs["z2"], mean=True)
+        loss_backward = CosLoss(outputs["p2"], outputs["z1"], mean=True)
+        loss = 0.5 * (loss_forward + loss_backward)
+
+        outputs["loss"] = loss
+        outputs["loss_forward"] = loss_forward
+        outputs["loss_backward"] = loss_backward
         return outputs
-    
-    def freeze_backbone(self):
-        """冻结Backbone权重，但保持STN和投影头可训练"""
-        # 只冻结特征提取器（backbone）
+
+    def freeze_backbone(self) -> None:
         for param in self.siamese_net.feature_extractor.parameters():
             param.requires_grad = False
-        
-        # STN和投影头保持可训练状态
-        if self.siamese_net.stn is not None:
-            for param in self.siamese_net.stn.parameters():
-                param.requires_grad = True
-        
-        for param in self.siamese_net.projection_head.parameters():
-            param.requires_grad = True
-    
-    def freeze_all(self):
-        """冻结所有权重（Backbone、STN和投影头）"""
-        # 冻结特征提取器
-        for param in self.siamese_net.feature_extractor.parameters():
+
+    def freeze_all(self) -> None:
+        for param in self.parameters():
             param.requires_grad = False
-        
-        # 冻结STN（如果存在）
-        if self.siamese_net.stn is not None:
-            for param in self.siamese_net.stn.parameters():
-                param.requires_grad = False
-        
-        # 冻结投影头
-        for param in self.siamese_net.projection_head.parameters():
-            param.requires_grad = False
-    
-    def get_trainable_parameters(self):
-        """获取可训练参数（用于调试）"""
-        trainable_params = []
-        for name, param in self.named_parameters():
-            if param.requires_grad:
-                trainable_params.append(name)
-        return trainable_params
+
+
+# ---------------------------------------------------------------------------
+# Loss functions
+
+
+def L2Loss(data1: Tensor, data2: Tensor) -> Tensor:
+    norm_data = torch.norm(data1 - data2, p=2, dim=1)
+    return norm_data.mean()
+
+
+def CosLoss(data1: Tensor, data2: Tensor, mean: bool = True) -> Tensor:
+    data2 = data2.detach()
+    cos = nn.CosineSimilarity(dim=1)
+    if mean:
+        return -cos(data1, data2).mean()
+    return -cos(data1, data2)
+

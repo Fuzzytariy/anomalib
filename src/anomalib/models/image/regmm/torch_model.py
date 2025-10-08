@@ -89,7 +89,7 @@ class SiamesePatchcoreModel(DynamicBufferMixin, nn.Module):
                 else:
                     nk = k
                 # 只接收属于 SiameseRegistrationNetwork 的模块
-                if nk.startswith(("feature_extractor.", "stn.", "projection_head.", "predictor.")):
+                if nk.startswith(("feature_extractor.", "stn.", "projection_head.", "predictor.", "encoder.")):
                     new_state[nk] = v
 
             missing, unexpected = self.feature_extractor.load_state_dict(new_state, strict=False)
