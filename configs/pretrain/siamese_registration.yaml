@@ -1,0 +1,105 @@
+# Siamese Registration Network Pretraining Configuration
+
+model:
+  class_path: anomalib.models.image.regmm.siamese.SiamesePretrainModel
+  init_args:
+    backbone: "wide_resnet50_2"
+    pre_trained: true
+    layers: ["layer1", "layer2", "layer3"]
+    projection_dim: 128
+    stn_enabled: true
+    predictor_dim: 512  # SimSiam预测器维度
+
+data:
+  class_path: anomalib.data.PretrainDataset
+  init_args:
+    name: "siamese_pretrain"
+    root: "D:/Projects/anomalib/datasets/MVTecAD"
+    category: ["bottle", "screw", "pill"]  # Support multiple categories, e.g., ["bottle", "cable", "capsule"]
+    split: "train"
+    image_size: [224, 224]
+    transform:
+      class_path: torchvision.transforms.Compose
+      init_args:
+        transforms:
+          - class_path: torchvision.transforms.Resize
+            init_args:
+              size: [224, 224]
+          - class_path: torchvision.transforms.ToTensor
+          - class_path: torchvision.transforms.Normalize
+            init_args:
+              mean: [0.485, 0.456, 0.406]
+              std: [0.229, 0.224, 0.225]
+
+trainer:
+  max_epochs: 3
+  accelerator: "auto"
+  devices: 1
+  precision: "16-mixed"
+  logger: true
+  enable_checkpointing: true
+  enable_progress_bar: true
+  deterministic: false  # Disable deterministic algorithms to avoid grid_sample errors
+  log_every_n_steps: 10  # Set smaller log interval to see training logs
+
+train_dataloader:
+  batch_size: 16  # 减小批次大小以避免内存问题
+  shuffle: true
+  num_workers: 4  # Windows multiprocessing issues, set to 0 if needed
+  pin_memory: true
+
+val_dataloader:
+  batch_size: 16  # 减小批次大小以避免内存问题
+  shuffle: false
+  num_workers: 4  # Windows上多进程有问题，暂时设为0
+  pin_memory: true
+
+optimizer:
+  class_path: torch.optim.Adam
+  init_args:
+    lr: 0.001
+    weight_decay: 0.0001
+
+lr_scheduler:
+  class_path: torch.optim.lr_scheduler.CosineAnnealingLR
+  init_args:
+    T_max: 100
+
+callbacks:
+  - class_path: pytorch_lightning.callbacks.ModelCheckpoint
+    init_args:
+      dirpath: "D:/Projects/anomalib/weights/siamese_registration"
+      filename: "siamese-{epoch:02d}-{val_loss:.4f}"
+      monitor: "val_loss"
+      mode: "min"
+      save_top_k: 3
+      save_last: true
+
+  - class_path: pytorch_lightning.callbacks.EarlyStopping
+    init_args:
+      monitor: "val_loss"
+      patience: 10
+      mode: "min"
+
+  - class_path: pytorch_lightning.callbacks.LearningRateMonitor
+    init_args:
+      logging_interval: "epoch"
+
+# Training configuration
+training:
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  val_check_interval: 1.0
+  check_val_every_n_epoch: 1
+
+# 日志配置
+logging:
+  save_dir: "logs/"
+  name: "siamese_registration"
+  version: "1.0.0"
+
+# 权重保存路径
+weights:
+  save_path: "D:/Projects/anomalib/weights/siamese_registration"
+  stn_weights_path: "D:/Projects/anomalib/weights/siamese_registration/stn_weights.pth"
+  projection_weights_path: "D:/Projects/anomalib/weights/siamese_registration/projection_weights.pth"

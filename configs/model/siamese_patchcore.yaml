@@ -1,0 +1,42 @@
+model:
+  class_path: anomalib.models.SiamesePatchcore
+  init_args:
+    layers: ["layer2", "layer3"]
+    backbone: "wide_resnet50_2"
+    pre_trained: true
+    num_neighbors: 9
+    siamese_weights: "D:/Projects/anomalib/weights/siamese_registration/siamese_final_weights.pth"
+    stn_enabled: true
+    projection_dim: 128
+    # distance metrics: eucildian, cosine, mahpp, mahalanois
+    distance: "euclidean"
+    coreset_sampling_ratio: 0.1
+# model:
+#   class_path: anomalib.models.Padim
+#   init_args:
+#     layers:
+#       - layer1
+#       - layer2
+#       - layer3
+#     backbone: resnet18
+#     pre_trained: true
+#     n_features: null
+
+
+# model:
+#    class_path: anomalib.models.image.Patchcore
+#    init_args:
+#      backbone: wide_resnet50_2
+#      layers: [layer2, layer3]
+#      pre_trained: true
+#      coreset_sampling_ratio: 0.1
+#      num_neighbors: 9
+
+data:
+  class_path: anomalib.data.datamodules.image.mvtecad.MVTecAD
+  init_args:
+    root: "D:/Projects/anomalib/datasets/MVTecAD"
+    category: "transistor"
+    train_batch_size: 8
+    eval_batch_size: 8
+    num_workers: 2

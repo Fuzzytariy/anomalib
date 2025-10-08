@@ -36,6 +36,9 @@ def _normalize(features: Tensor) -> Tensor:
 
 
 def _gaussian_kernel(x: Tensor, y: Tensor, sigma: float = 1.0) -> Tensor:
+    # Ensure both tensors are on the same device
+    if x.device != y.device:
+        y = y.to(x.device)
     return torch.exp(-torch.cdist(x, y, p=2) ** 2 / (2 * sigma**2))
 
 
@@ -70,6 +73,12 @@ class DistributionEstimator(nn.Module):
 
     def _mmd(self, layer: str, features: Tensor) -> Tensor:
         memory = self.memory_features[layer]
+        
+        # Ensure memory is on the same device as features
+        if memory.device != features.device:
+            memory = memory.to(features.device)
+            
+        # Ensure all tensors are on the same device for kernel computations
         kernel_xx = _gaussian_kernel(features, features, sigma=self.mmd_sigma)
         kernel_yy = _gaussian_kernel(memory, memory, sigma=self.mmd_sigma)
         kernel_xy = _gaussian_kernel(features, memory, sigma=self.mmd_sigma)

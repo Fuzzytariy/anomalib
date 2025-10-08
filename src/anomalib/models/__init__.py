@@ -76,6 +76,7 @@ from .image import (
     UniNet,
     VlmAd,
     WinClip,
+    SiamesePatchcore
 )
 from .video import AiVad, Fuvas
 
@@ -116,6 +117,7 @@ __all__ = [
     "WinClip",
     "AiVad",
     "Fuvas",
+    "SiamesePatchcore"
 ]
 
 logger = logging.getLogger(__name__)

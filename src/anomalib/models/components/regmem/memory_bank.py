@@ -1,4 +1,4 @@
-"""Patch memory bank construction utilities."""
+"""Patch memory bank construction utilities with GraphCore support."""
 
 from __future__ import annotations
 
@@ -8,6 +8,14 @@ from typing import Dict
 
 import torch
 from torch import Tensor, nn
+
+def _ensure_same_device(*tensors: Tensor) -> tuple[Tensor, ...]:
+    """Ensure all tensors are on the same device."""
+    if not tensors:
+        return tensors
+    
+    target_device = tensors[0].device
+    return tuple(tensor.to(target_device) if tensor.device != target_device else tensor for tensor in tensors)
 
 
 def _flatten_patches(features: Tensor) -> Tensor:
@@ -65,27 +73,34 @@ class MemoryBankItem:
 
 
 class PatchMemoryBank(nn.Module):
-    """Build a compact memory bank of registered patch descriptors."""
+    """Build a compact memory bank of registered patch descriptors with GraphCore support."""
 
     def __init__(
         self,
         layers: list[str],
         coreset_sampling_ratio: float = 0.05,
         device: torch.device | None = None,
+        use_graphcore: bool = True,
     ) -> None:
         super().__init__()
         self.layers = layers
         self.coreset_sampling_ratio = coreset_sampling_ratio
         self.device = device
+        self.use_graphcore = use_graphcore
+        
+        # Add storage for GraphCore features
         self.reset()
 
     def reset(self) -> None:
         self.register_buffer("_is_built", torch.tensor(False), persistent=True)
         self._storage: dict[str, list[Tensor]] = {layer: [] for layer in self.layers}
         self._weights: dict[str, list[Tensor]] = {layer: [] for layer in self.layers}
+        self._graphcore_storage: list[Tensor] = []  # Store GraphCore features separately
         self.memory: dict[str, MemoryBankItem] = {}
+        self.graphcore_memory: MemoryBankItem | None = None
 
-    def update(self, features: Mapping[str, Tensor], weights: Mapping[str, Tensor] | None = None) -> None:
+    def update(self, features: Mapping[str, Tensor], weights: Mapping[str, Tensor] | None = None, 
+               graphcore_features: Tensor | None = None) -> None:
         """Accumulate support features prior to coreset sampling."""
 
         weights = weights or {}
@@ -99,18 +114,31 @@ class PatchMemoryBank(nn.Module):
             self._storage[layer].append(feats)
             if weight is not None:
                 self._weights[layer].append(weight)
+                
+        # Store GraphCore features if available
+        if self.use_graphcore and graphcore_features is not None:
+            device = self.device or graphcore_features.device
+            self._graphcore_storage.append(graphcore_features.detach().to(device))
 
     def build(self) -> None:
         """Apply greedy coreset sampling and finalise the memory bank."""
 
         self.memory.clear()
+        self.graphcore_memory = None
+        
+        # Build memory for each layer
         for layer in self.layers:
             if not self._storage[layer]:
                 continue
             device = self.device or self._storage[layer][0].device
-            features = torch.cat(self._storage[layer], dim=0).to(device)
+            # Ensure all tensors are on the same device before concatenation
+            storage_tensors = [tensor.to(device) for tensor in self._storage[layer]]
+            # Double-check device synchronization
+            storage_tensors = list(_ensure_same_device(*storage_tensors))
+            features = torch.cat(storage_tensors, dim=0)
             if self._weights[layer]:
-                weights = torch.cat(self._weights[layer], dim=0).to(device)
+                weight_tensors = [tensor.to(device) for tensor in self._weights[layer]]
+                weights = torch.cat(weight_tensors, dim=0)
             else:
                 weights = torch.ones(features.shape[0], device=device)
             num_samples = max(1, int(features.shape[0] * self.coreset_sampling_ratio))
@@ -118,8 +146,19 @@ class PatchMemoryBank(nn.Module):
             sampled_weights = _normalize_weights(weights[indices], sampled.shape[0], device=device)
             self.memory[layer] = MemoryBankItem(features=sampled, weights=sampled_weights)
 
-        if self.memory:
-            device = self.device or next(iter(self.memory.values())).features.device
+        # Build GraphCore memory if available
+        if self.use_graphcore and self._graphcore_storage:
+            device = self.device or self._graphcore_storage[0].device
+            # Ensure all tensors are on the same device before concatenation
+            graphcore_tensors = [tensor.to(device) for tensor in self._graphcore_storage]
+            graphcore_features = torch.cat(graphcore_tensors, dim=0)
+            num_samples = max(1, int(graphcore_features.shape[0] * self.coreset_sampling_ratio))
+            sampled, indices = greedy_coreset(graphcore_features, num_samples=num_samples)
+            weights = torch.ones(sampled.shape[0], device=device)
+            self.graphcore_memory = MemoryBankItem(features=sampled, weights=weights)
+
+        if self.memory or self.graphcore_memory:
+            device = self.device or torch.device("cpu")
         else:
             device = self.device or torch.device("cpu")
         self._is_built = torch.tensor(True, device=device)

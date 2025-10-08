@@ -84,6 +84,7 @@ from .datasets.image import (
 )
 from .datasets.video import AvenueDataset, ShanghaiTechDataset, UCSDpedDataset
 from .predict import PredictDataset
+from .pretrain_dataset import PretrainDataset
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +211,7 @@ __all__ = [
     "ShanghaiTechDataset",
     "UCSDpedDataset",
     "PredictDataset",
+    "PretrainDataset",
     # Functions
     "get_datamodule",
     # Exceptions

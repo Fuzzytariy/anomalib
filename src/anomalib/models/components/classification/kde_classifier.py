@@ -33,8 +33,6 @@ from enum import Enum
 import torch
 from torch import nn
 
-from anomalib.models.components import PCA, GaussianKDE
-
 logger = logging.getLogger(__name__)
 
 
@@ -90,8 +88,8 @@ class KDEClassifier(nn.Module):
         self.feature_scaling_method = feature_scaling_method
         self.max_training_points = max_training_points
 
-        self.pca_model = PCA(n_components=self.n_pca_components)
-        self.kde_model = GaussianKDE()
+        self.pca_model = None
+        self.kde_model = None
 
         self.register_buffer("max_length", torch.empty([]))
         self.max_length = torch.empty([])
@@ -145,6 +143,9 @@ class KDEClassifier(nn.Module):
             >>> success = classifier.fit(embeddings)
             >>> assert success
         """
+        from anomalib.models.components.dimensionality_reduction import PCA
+        from anomalib.models.components.stats import GaussianKDE
+
         if embeddings.shape[0] < self.n_pca_components:
             logger.info("Not enough features to commit. Not making a model.")
             return False
@@ -159,6 +160,8 @@ class KDEClassifier(nn.Module):
         else:
             selected_features = embeddings
 
+        self.pca_model = PCA(n_components=self.n_pca_components)
+        self.kde_model = GaussianKDE()
         feature_stack = self.pca_model.fit_transform(selected_features)
         feature_stack, max_length = self.pre_process(feature_stack)
         self.max_length = max_length

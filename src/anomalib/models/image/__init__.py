@@ -66,6 +66,7 @@ from .uflow import Uflow
 from .uninet import UniNet
 from .vlm_ad import VlmAd
 from .winclip import WinClip
+from .regmm import SiamesePatchcore
 
 __all__ = [
     "Cfa",
@@ -82,6 +83,7 @@ __all__ = [
     "Padim",
     "Patchcore",
     "RegMemFSAD",
+    "SiamesePatchcore",
     "ReverseDistillation",
     "Stfpm",
     "Supersimplenet",
