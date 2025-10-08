@@ -159,14 +159,16 @@ class STNModule(nn.Module):
             nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
         )
 
-        self.fc = nn.Sequential(
-            nn.Linear(16 * self.feat_size * self.feat_size, 1024),
-            nn.ReLU(True),
-            nn.Linear(1024, self.stn_n_params),
-        )
+        # The fully connected projection adapts to the incoming spatial resolution so that
+        # we can support arbitrary input sizes (e.g. 224, 256) without hard-coding the
+        # feature map dimensions used in the original RegAD implementation.
+        self.flatten = nn.Flatten()
+        self.fc1 = nn.LazyLinear(1024)
+        self.fc_relu = nn.ReLU(True)
+        self.fc2 = nn.Linear(1024, self.stn_n_params)
 
         # Parameter initialisation mirrors the RegAD reference.
-        nn.init.zeros_(self.fc[2].weight)
+        nn.init.zeros_(self.fc2.weight)
         if self.stn_mode == "affine":
             bias = torch.tensor([1, 0, 0, 0, 1, 0], dtype=torch.float)
         elif self.stn_mode in {"translation", "shear"}:
@@ -183,12 +185,12 @@ class STNModule(nn.Module):
             bias = torch.tensor([0, 0, 0], dtype=torch.float)
         else:  # rotation_translation_scale
             bias = torch.tensor([0, 0, 0, 1, 1], dtype=torch.float)
-        self.fc[2].bias = nn.Parameter(bias)
+        self.fc2.bias = nn.Parameter(bias)
 
     def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
         batch_size = x.size(0)
         conv_x = self.conv(x)
-        theta = self.fc(conv_x.view(batch_size, -1))
+        theta = self.fc2(self.fc_relu(self.fc1(self.flatten(conv_x))))
         theta_affine = self._build_theta(theta, batch_size, x.device)
         grid = F.affine_grid(theta_affine, x.shape, align_corners=False)
         transformed = F.grid_sample(x, grid, padding_mode="reflection", align_corners=False)
