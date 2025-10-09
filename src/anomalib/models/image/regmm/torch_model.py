@@ -48,6 +48,9 @@ class SiamesePatchcoreModel(DynamicBufferMixin, nn.Module):
             projection_dim=self.projection_dim
         )
 
+        # Cache the dimensionality of the Siamese embedding for debugging/logging.
+        self.feature_dim = getattr(self.feature_extractor, "out_channels", None)
+
         # 加载预训练权重
         if self.siamese_weights:
             self.load_siamese_weights(self.siamese_weights)
@@ -92,9 +95,24 @@ class SiamesePatchcoreModel(DynamicBufferMixin, nn.Module):
                 if nk.startswith(("feature_extractor.", "stn.", "projection_head.", "predictor.", "encoder.")):
                     new_state[nk] = v
 
-            missing, unexpected = self.feature_extractor.load_state_dict(new_state, strict=False)
+            target_state = self.feature_extractor.state_dict()
+            filtered_state = {}
+            skipped = {}
+            for key, tensor in new_state.items():
+                if key in target_state and target_state[key].shape == tensor.shape:
+                    filtered_state[key] = tensor
+                else:
+                    skipped[key] = tensor.shape
+
+            missing, unexpected = self.feature_extractor.load_state_dict(filtered_state, strict=False)
             print(f"✓ 加载Siamese权重: {weights_path}")
-            print(f"   加载参数数: {len(new_state)} | missing: {len(missing)} | unexpected: {len(unexpected)}")
+            print(
+                "   加载参数数:"
+                f" {len(filtered_state)} | missing: {len(missing)} | unexpected: {len(unexpected)} | skipped: {len(skipped)}"
+            )
+            if skipped:
+                preview = list(skipped)[:5]
+                print(f"   跳过的权重(前5项): {preview}")
         except Exception as e:
             print(f"✗ 加载Siamese权重失败: {e}")
             print("✓ 将使用随机初始化的权重")

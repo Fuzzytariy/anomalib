@@ -272,6 +272,13 @@ def parse_args() -> argparse.Namespace:
         default="rotation_scale",
         choices=list(N_PARAMS.keys()),
     )
+    parser.add_argument(
+        "--backbone",
+        type=str,
+        default="wide_resnet50_2",
+        choices=["resnet18", "wide_resnet50_2"],
+        help="Backbone architecture for the Siamese STN encoder.",
+    )
     return parser.parse_args()
 
 
@@ -295,9 +302,9 @@ def main() -> None:
         drop_last=True,
     )
 
-    stn_model = stn_net(args.stn_mode, pretrained=True).to(device)
-    encoder = Encoder().to(device)
-    predictor = Predictor().to(device)
+    stn_model = stn_net(args.backbone, args.stn_mode, pretrained=True).to(device)
+    encoder = Encoder(in_channels=stn_model.out_channels).to(device)
+    predictor = Predictor(in_channels=stn_model.out_channels).to(device)
 
     params = list(stn_model.parameters()) + list(encoder.parameters()) + list(predictor.parameters())
     optimizer = SGD(params, lr=args.lr, momentum=args.momentum, weight_decay=1e-4)
