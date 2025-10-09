@@ -16,13 +16,19 @@ from typing import Dict, Iterable, List, Optional
 import torch
 from torch import Tensor, nn
 import torch.nn.functional as F
-from torchvision.models import ResNet18_Weights, resnet18
+from torchvision.models import (
+    ResNet18_Weights,
+    Wide_ResNet50_2_Weights,
+    resnet18,
+    wide_resnet50_2,
+)
 
 __all__ = [
     "Encoder",
     "Predictor",
     "STNModule",
     "ResNetWithSTN",
+    "Bottleneck",
     "stn_net",
     "SiameseRegistrationNetwork",
     "SiamesePretrainModel",
@@ -83,18 +89,19 @@ def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
 class Encoder(nn.Module):
     """Channel preserving encoder copied from RegAD."""
 
-    def __init__(self) -> None:
+    def __init__(self, in_channels: int = 256, hidden_channels: Optional[int] = None) -> None:
         super().__init__()
-        self.conv1 = conv1x1(in_planes=256, out_planes=256)
-        self.bn1 = nn.BatchNorm2d(256)
+        hidden = hidden_channels or in_channels
+        self.conv1 = conv1x1(in_planes=in_channels, out_planes=hidden)
+        self.bn1 = nn.BatchNorm2d(hidden)
         self.relu1 = nn.ReLU()
 
-        self.conv2 = conv1x1(in_planes=256, out_planes=256)
-        self.bn2 = nn.BatchNorm2d(256)
+        self.conv2 = conv1x1(in_planes=hidden, out_planes=hidden)
+        self.bn2 = nn.BatchNorm2d(hidden)
         self.relu2 = nn.ReLU()
 
-        self.conv3 = conv1x1(in_planes=256, out_planes=256)
-        self.bn3 = nn.BatchNorm2d(256)
+        self.conv3 = conv1x1(in_planes=hidden, out_planes=hidden)
+        self.bn3 = nn.BatchNorm2d(hidden)
         self.relu3 = nn.ReLU()
 
     def forward(self, x: Tensor) -> Tensor:
@@ -113,13 +120,13 @@ class Encoder(nn.Module):
 class Predictor(nn.Module):
     """Predictor head (also channel preserving) from RegAD."""
 
-    def __init__(self) -> None:
+    def __init__(self, in_channels: int = 256) -> None:
         super().__init__()
-        self.conv1 = conv1x1(in_planes=256, out_planes=256)
-        self.bn1 = nn.BatchNorm2d(256)
+        self.conv1 = conv1x1(in_planes=in_channels, out_planes=in_channels)
+        self.bn1 = nn.BatchNorm2d(in_channels)
         self.relu1 = nn.ReLU()
 
-        self.conv2 = conv1x1(in_planes=256, out_planes=256)
+        self.conv2 = conv1x1(in_planes=in_channels, out_planes=in_channels)
 
     def forward(self, x: Tensor) -> Tensor:
         x = self.conv1(x)
@@ -298,32 +305,105 @@ class BasicBlock(nn.Module):
         return out
 
 
-class ResNetWithSTN(nn.Module):
-    """ResNet-18 backbone augmented with STN modules (RegAD)."""
+class Bottleneck(nn.Module):
+    expansion: int = 4
 
-    def __init__(self, stn_mode: str, block: type[nn.Module] = BasicBlock, layers: Iterable[int] = (2, 2, 2, 2)) -> None:
+    def __init__(
+        self,
+        inplanes: int,
+        planes: int,
+        stride: int = 1,
+        downsample: Optional[nn.Module] = None,
+        groups: int = 1,
+        base_width: int = 64,
+        dilation: int = 1,
+        norm_layer: Optional[nn.Module] = None,
+    ) -> None:
+        super().__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        width = int(planes * (base_width / 64.0)) * groups
+
+        self.conv1 = conv1x1(inplanes, width)
+        self.bn1 = norm_layer(width)
+        self.conv2 = conv3x3(width, width, stride, groups, dilation)
+        self.bn2 = norm_layer(width)
+        self.conv3 = conv1x1(width, planes * self.expansion)
+        self.bn3 = norm_layer(planes * self.expansion)
+        self.relu = nn.ReLU(inplace=True)
+        self.downsample = downsample
+        self.stride = stride
+
+    def forward(self, x: Tensor) -> Tensor:
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out += identity
+        out = self.relu(out)
+        return out
+
+
+class ResNetWithSTN(nn.Module):
+    """ResNet backbone augmented with STN modules (RegAD)."""
+
+    def __init__(
+        self,
+        stn_mode: str,
+        block: type[nn.Module] = BasicBlock,
+        layers: Iterable[int] = (2, 2, 2, 2),
+        groups: int = 1,
+        base_width: int = 64,
+    ) -> None:
         super().__init__()
         self.inplanes = 64
+        self.groups = groups
+        self.base_width = base_width
         self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
         self.bn1 = nn.BatchNorm2d(64)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
 
+        self.layer_channels: List[int] = []
+
         self.layer1 = self._make_layer(block, 64, layers[0], stride=1)
-        self.stn1 = STNModule(64, 1, stn_mode)
+        self.layer_channels.append(self.inplanes)
+        self.stn1 = STNModule(self.layer_channels[-1], 1, stn_mode)
 
         self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
-        self.stn2 = STNModule(128, 2, stn_mode)
+        self.layer_channels.append(self.inplanes)
+        self.stn2 = STNModule(self.layer_channels[-1], 2, stn_mode)
 
         self.layer3 = self._make_layer(block, 256, layers[2], stride=2)
-        self.stn3 = STNModule(256, 3, stn_mode)
+        self.layer_channels.append(self.inplanes)
+        self.stn3 = STNModule(self.layer_channels[-1], 3, stn_mode)
+
+        self.out_channels = self.layer_channels[-1]
 
         # placeholders populated after forward pass
         self.stn1_output: Tensor | None = None
         self.stn2_output: Tensor | None = None
         self.stn3_output: Tensor | None = None
 
-    def _make_layer(self, block: type[nn.Module], planes: int, blocks: int, stride: int = 1) -> nn.Sequential:
+    def _make_layer(
+        self,
+        block: type[nn.Module],
+        planes: int,
+        blocks: int,
+        stride: int = 1,
+    ) -> nn.Sequential:
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             downsample = nn.Sequential(
@@ -331,10 +411,19 @@ class ResNetWithSTN(nn.Module):
                 nn.BatchNorm2d(planes * block.expansion),
             )
 
-        layers = [block(self.inplanes, planes, stride, downsample)]
+        layers = [
+            block(
+                self.inplanes,
+                planes,
+                stride,
+                downsample,
+                groups=self.groups,
+                base_width=self.base_width,
+            )
+        ]
         self.inplanes = planes * block.expansion
         for _ in range(1, blocks):
-            layers.append(block(self.inplanes, planes))
+            layers.append(block(self.inplanes, planes, groups=self.groups, base_width=self.base_width))
         return nn.Sequential(*layers)
 
     @staticmethod
@@ -376,14 +465,32 @@ class ResNetWithSTN(nn.Module):
         return out
 
 
-def stn_net(stn_mode: str, pretrained: bool = True) -> ResNetWithSTN:
-    """Construct the STN-equipped ResNet-18 backbone."""
+def stn_net(backbone: str, stn_mode: str, pretrained: bool = True) -> ResNetWithSTN:
+    """Construct the STN-equipped ResNet backbone."""
 
-    model = ResNetWithSTN(stn_mode, BasicBlock, [2, 2, 2, 2])
+    backbone_name = backbone.split(".")[0]
+    if backbone_name == "resnet18":
+        model = ResNetWithSTN(stn_mode, BasicBlock, [2, 2, 2, 2])
+        weight_enum = ResNet18_Weights.IMAGENET1K_V1
+        constructor = resnet18
+    elif backbone_name == "wide_resnet50_2":
+        model = ResNetWithSTN(
+            stn_mode,
+            Bottleneck,
+            [3, 4, 6, 3],
+            base_width=64 * 2,
+        )
+        weight_enum = Wide_ResNet50_2_Weights.IMAGENET1K_V1
+        constructor = wide_resnet50_2
+    else:
+        raise ValueError(
+            f"Unsupported backbone '{backbone}'. Choices: ['resnet18', 'wide_resnet50_2']"
+        )
+
     if pretrained:
-        weights = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1).state_dict()
+        weights = constructor(weights=weight_enum).state_dict()
         model_dict = model.state_dict()
-        filtered = {k: v for k, v in weights.items() if k in model_dict}
+        filtered = {k: v for k, v in weights.items() if k in model_dict and model_dict[k].shape == v.shape}
         model_dict.update(filtered)
         model.load_state_dict(model_dict)
     return model
@@ -403,32 +510,51 @@ class SiameseRegistrationNetwork(nn.Module):
 
     def __init__(
         self,
-        backbone: str = "resnet18",
+        backbone: str = "wide_resnet50_2",
         pre_trained: bool = True,
         layers: Optional[List[str]] = None,
         stn_enabled: bool = True,
         stn_mode: str = "rotation_scale",
+        projection_dim: Optional[int] = None,
     ) -> None:
         super().__init__()
-        if backbone != "resnet18":
-            raise ValueError("RegAD SiameseRegistrationNetwork only supports resnet18 backbone")
 
+        backbone_name = backbone.split(".")[0]
+        if backbone_name not in {"resnet18", "wide_resnet50_2"}:
+            raise ValueError(
+                "RegAD SiameseRegistrationNetwork only supports ['resnet18', 'wide_resnet50_2']"
+            )
+
+        self.backbone = backbone_name
         self.layers = layers or ["layer1", "layer2", "layer3"]
         if not stn_enabled:
             raise ValueError("RegAD SiameseRegistrationNetwork requires the STN-enabled backbone")
         self.stn_enabled = stn_enabled
         self.config = SiameseConfig(stn_mode=stn_mode)
 
-        # In the RegAD implementation the STN backbone, encoder and predictor are
-        # independent modules.  We expose them here as submodules so that the
-        # weight loading logic in ``torch_model.py`` can locate the parameters.
         if self.stn_enabled:
-            self.feature_extractor = stn_net(self.config.stn_mode, pretrained=pre_trained)
+            self.feature_extractor = stn_net(self.backbone, self.config.stn_mode, pretrained=pre_trained)
+            self.feature_dim = self.feature_extractor.out_channels
         else:
-            # fall back to the vanilla resnet18 without spatial alignment
-            self.feature_extractor = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1 if pre_trained else None)
-        self.encoder = Encoder()
-        self.predictor = Predictor()
+            if backbone_name == "resnet18":
+                base_model = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1 if pre_trained else None)
+            else:
+                base_model = wide_resnet50_2(weights=Wide_ResNet50_2_Weights.IMAGENET1K_V1 if pre_trained else None)
+            self.feature_extractor = base_model
+            self.feature_dim = getattr(base_model, "fc").in_features
+
+        self.projection_dim = projection_dim
+        if self.projection_dim is not None and self.projection_dim > 0 and self.projection_dim != self.feature_dim:
+            self.projection_head = nn.Conv2d(self.feature_dim, self.projection_dim, kernel_size=1, bias=False)
+            self.output_dim = self.projection_dim
+        else:
+            self.projection_head = None
+            self.output_dim = self.feature_dim
+
+        self.out_channels = self.output_dim
+
+        self.encoder = Encoder(in_channels=self.output_dim)
+        self.predictor = Predictor(in_channels=self.output_dim)
 
     def forward(self, query: Tensor, support: Optional[Tensor] = None) -> Dict[str, Tensor]:
         if support is None:
@@ -453,8 +579,13 @@ class SiameseRegistrationNetwork(nn.Module):
 
     def _extract_backbone(self, x: Tensor) -> Tensor:
         if isinstance(self.feature_extractor, ResNetWithSTN):
-            return self.feature_extractor(x)
-        return self.feature_extractor(x)
+            feat = self.feature_extractor(x)
+        else:
+            feat = self.feature_extractor(x)
+
+        if self.projection_head is not None:
+            feat = self.projection_head(feat)
+        return feat
 
     def extract_features(self, x: Tensor) -> Dict[str, Tensor]:
         if not isinstance(self.feature_extractor, ResNetWithSTN):
@@ -467,19 +598,29 @@ class SiameseRegistrationNetwork(nn.Module):
         if "layer2" in self.layers and self.feature_extractor.stn2_output is not None:
             outputs["layer2"] = self.feature_extractor.stn2_output
         if "layer3" in self.layers and self.feature_extractor.stn3_output is not None:
-            outputs["layer3"] = self.feature_extractor.stn3_output
+            feat3 = self.feature_extractor.stn3_output
+            if self.projection_head is not None:
+                feat3 = self.projection_head(feat3)
+            outputs["layer3"] = feat3
         return outputs
 
 
 class SiamesePretrainModel(nn.Module):
     """Simple wrapper computing the symmetric cosine loss used in RegAD."""
 
-    def __init__(self, stn_mode: str = "rotation_scale", pre_trained: bool = True) -> None:
+    def __init__(
+        self,
+        stn_mode: str = "rotation_scale",
+        pre_trained: bool = True,
+        backbone: str = "wide_resnet50_2",
+        projection_dim: Optional[int] = None,
+    ) -> None:
         super().__init__()
         self.siamese_net = SiameseRegistrationNetwork(
-            backbone="resnet18",
+            backbone=backbone,
             pre_trained=pre_trained,
             stn_mode=stn_mode,
+            projection_dim=projection_dim,
         )
 
     def forward(self, query: Tensor, support: Tensor) -> Dict[str, Tensor]:
